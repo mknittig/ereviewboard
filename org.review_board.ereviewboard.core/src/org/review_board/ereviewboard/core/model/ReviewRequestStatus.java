@@ -44,12 +44,12 @@ package org.review_board.ereviewboard.core.model;
  */
 public enum ReviewRequestStatus {
 
-    PENDING, SUBMITTED, DISCARDED, NONE;
+    PENDING, SUBMITTED, DISCARDED, NONE, ALL;
 
     public static ReviewRequestStatus parseStatus(String status) {
         ReviewRequestStatus result;
 
-        switch (status.charAt(0)) {
+        switch (Character.toUpperCase(status.charAt(0))) {
         case 'P':
             result = ReviewRequestStatus.PENDING;
             break;
@@ -58,6 +58,9 @@ public enum ReviewRequestStatus {
             break;
         case 'D':
             result = ReviewRequestStatus.DISCARDED;
+            break;
+        case 'A':
+            result = ReviewRequestStatus.ALL;
             break;
         default:
             result = ReviewRequestStatus.NONE;

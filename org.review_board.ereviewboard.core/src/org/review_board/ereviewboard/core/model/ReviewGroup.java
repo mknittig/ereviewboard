@@ -37,15 +37,13 @@
  *******************************************************************************/
 package org.review_board.ereviewboard.core.model;
 
-import org.json.JSONException;
-import org.json.JSONObject;
 
 /**
  * Domain class for review groups.
  *
  * @author Markus Knittig
  */
-public class ReviewGroup implements Marshallable {
+public class ReviewGroup {
 
     private int id;
     private String name;
@@ -130,34 +128,6 @@ public class ReviewGroup implements Marshallable {
      */
     public void setMailingList(String mailingList) {
         this.mailingList = mailingList;
-    }
-
-    public void marshall(JSONObject jsonObject) {
-        try {
-            id = jsonObject.getInt("id");
-            name = jsonObject.getString("name");
-            displayName = jsonObject.getString("display_name");
-            url = jsonObject.getString("url");
-            mailingList = jsonObject.getString("mailing_list");
-        } catch (JSONException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    public JSONObject unmarshall() {
-        JSONObject jsonObject = new JSONObject();
-
-        try {
-            jsonObject.put("id", id);
-            jsonObject.put("name", name);
-            jsonObject.put("display_name", displayName);
-            jsonObject.put("url", url);
-            jsonObject.put("mailing_list", mailingList);
-        } catch (JSONException e) {
-            throw new RuntimeException(e);
-        }
-
-        return jsonObject;
     }
 
     @Override

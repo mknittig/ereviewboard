@@ -38,9 +38,9 @@
 package org.review_board.ereviewboard.core.model;
 
 /**
- * Represents a query which gets review requests with a specific group as reviewer
- * by there status.
- *
+ * Represents a query which gets review requests with a specific group as
+ * reviewer by there status.
+ * 
  * @author Markus Knittig
  */
 public class GroupReviewRequestQuery extends StatusReviewRequestQuery {
@@ -52,9 +52,15 @@ public class GroupReviewRequestQuery extends StatusReviewRequestQuery {
         this.groupname = groupname;
     }
 
+    public String getGroupname() {
+
+        return groupname;
+    }
+
     @Override
     public String getQuery() {
-        return String.format("to/group/%s%s", groupname, super.getQuery());
+
+        return super.getQuery() + "&" + Parameter.ToGroups.getParameterName() + "=" + groupname;
     }
 
 }

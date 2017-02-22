@@ -37,114 +37,216 @@
  *******************************************************************************/
 package org.review_board.ereviewboard.core.client;
 
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.nullValue;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThat;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.util.Collections;
 import java.util.List;
 
-import junit.framework.TestCase;
-
-import org.review_board.ereviewboard.core.model.Comment;
+import org.junit.Before;
+import org.junit.Test;
+import org.review_board.ereviewboard.core.ReviewboardAttributeMapper;
+import org.review_board.ereviewboard.core.exception.ReviewboardException;
+import org.review_board.ereviewboard.core.model.Diff;
+import org.review_board.ereviewboard.core.model.DiffComment;
 import org.review_board.ereviewboard.core.model.Repository;
 import org.review_board.ereviewboard.core.model.Review;
 import org.review_board.ereviewboard.core.model.ReviewGroup;
 import org.review_board.ereviewboard.core.model.ReviewRequest;
+import org.review_board.ereviewboard.core.model.ReviewRequestStatus;
 import org.review_board.ereviewboard.core.model.User;
 
 /**
  * @author Markus Knittig
- *
+ * 
  */
-public class RestfulReviewboardReaderTest extends TestCase {
+public class RestfulReviewboardReaderTest {
 
-    private RestfulReviewboardReader testReader;
+    private RestfulReviewboardReader reader;
 
-    protected void setUp() throws Exception {
-        super.setUp();
-        testReader = new RestfulReviewboardReader();
+    @Before
+    public void setUp() {
+
+        reader = new RestfulReviewboardReader();
     }
 
-    private String inputStreamToString(InputStream in) throws IOException {
+    @Test
+    public void readUsers() throws Exception {
+
+        // http://www.reviewboard.org/docs/manual/dev/webapi/2.0/resources/user-list/
+        List<User> users = reader.readUsers(readJsonTestResource("users.json"));
+
+        assertThat("users.size", users.size(), is(4));
+
+        User user = users.get(0);
+
+        assertThat("users[0].email", user.getEmail(), is("admin@example.com"));
+        assertThat("users[0].firstName", user.getFirstName(), is("Admin"));
+        assertThat("users[0].fullName", user.getFullName(), is("Admin User"));
+        assertThat("users[0].id", user.getId(), is(1));
+        assertThat("users[0].lastName", user.getLastName(), is("User"));
+        assertThat("users[0].userName", user.getUsername(), is("admin"));
+        assertThat("users[0].url", user.getUrl(), is("/users/admin/"));
+    }
+
+    private String readJsonTestResource(String resourceName) throws IOException {
+
+        InputStream in = getClass().getResourceAsStream("/jsondata/" + resourceName);
+
         BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(in));
-        StringBuilder stringBuilder = new StringBuilder();
-        String line = null;
+        try {
+            StringBuilder stringBuilder = new StringBuilder();
+            String line = null;
 
-        while ((line = bufferedReader.readLine()) != null) {
-            stringBuilder.append(line + "\n");
+            while ((line = bufferedReader.readLine()) != null)
+                stringBuilder.append(line).append('\n');
+            bufferedReader.close();
+
+            return stringBuilder.toString();
+        } finally {
+            bufferedReader.close();
         }
-        bufferedReader.close();
-
-        return stringBuilder.toString();
     }
 
-    public void testReadUsers() throws Exception {
-        InputStream in = getClass().getResourceAsStream("/jsondata/users.json");
+    @Test
+    public void readGroups() throws Exception {
 
-        List<User> users = testReader.readUsers(inputStreamToString(in));
+        // http://www.reviewboard.org/docs/manual/dev/webapi/2.0/resources/review-group-list/
+        List<ReviewGroup> groups = reader.readGroups(readJsonTestResource("groups.json"));
 
-        assertEquals(2, users.size());
-        assertEquals("joe.doe@example.com", users.get(0).getEmail());
+        assertThat("groups.size", groups.size(), is(4));
+
+        ReviewGroup firstGroup = groups.get(0);
+        assertThat("groups[0].displayName", firstGroup.getDisplayName(), is("Dev Group"));
+        assertThat("groups[0].id", firstGroup.getId(), is(1));
+        assertThat("groups[0].mailingList", firstGroup.getMailingList(), is("devgroup@example.com"));
+        assertThat("groups[0].name", firstGroup.getName(), is("devgroup"));
+        assertThat("groups[0].url", firstGroup.getUrl(), is("/groups/devgroup/"));
     }
 
-    public void testReadGroups() throws Exception {
-        InputStream in = getClass().getResourceAsStream("/jsondata/groups.json");
+    @Test
+    public void readRepositories() throws Exception {
 
-        List<ReviewGroup> groups = testReader.readGroups(inputStreamToString(in));
+        // http://www.reviewboard.org/docs/manual/dev/webapi/2.0/resources/repository-list/
+        List<Repository> repositories = reader.readRepositories(readJsonTestResource("repositories.json"));
 
-        assertEquals(1, groups.size());
+        assertThat("repositories.size", repositories.size(), is(2));
+
+        Repository repository = repositories.get(0);
+        assertThat("repositories[0].id", repository.getId(), is(1));
+        assertThat("repositories[0].name", repository.getName(), is("Review Board SVN"));
+        assertThat("repositories[0].path", repository.getPath(),
+                is("http://reviewboard.googlecode.com/svn"));
+        assertThat("repositories[0].tool", repository.getTool(), is("Subversion"));
     }
 
-    public void testReadRepositories() throws Exception {
-        InputStream in = getClass().getResourceAsStream("/jsondata/repositories.json");
+    @Test
+    public void readReviewRequests() throws Exception {
 
-        List<Repository> reviewRequests = testReader.readRepositories(inputStreamToString(in));
+        // http://www.reviewboard.org/docs/manual/1.5/webapi/2.0/resources/review-request-list/
+        List<ReviewRequest> reviewRequests = reader.readReviewRequests(readJsonTestResource("review_requests.json"));
 
-        assertEquals(1, reviewRequests.size());
+        assertThat("reviewRequests.size", reviewRequests.size(), is(5));
+        
+        ReviewRequest firstRequest = reviewRequests.get(0);
+
+        // first review request, most fields are set
+        assertThat("firstReviewRequest.id", firstRequest.getId(), is(8));
+        assertThat("firstReviewRequest.submitter", firstRequest.getSubmitter(), is("admin"));
+        assertThat("firstReviewRequest.summary", firstRequest.getSummary(), is("Interdiff Revision Test"));
+        assertThat("firstReviewRequest.description", firstRequest.getDescription(), is("This is a test designed for interdiffs."));
+        assertThat("firstReviewRequest.public", firstRequest.isPublic(), is(true));
+        assertThat("firstReviewRequest.status", firstRequest.getStatus(), is(ReviewRequestStatus.PENDING));
+        assertThat("firstReviewRequest.changeNum", firstRequest.getChangeNumber(), nullValue());
+        assertThat("firstReviewRequest.lastUpdated", firstRequest.getLastUpdated(), is(ReviewboardAttributeMapper.parseDateValue("2010-08-28 02:26:18")));
+        assertThat("firstReviewRequest.timeAdded", firstRequest.getTimeAdded(), is(ReviewboardAttributeMapper.parseDateValue("2009-02-25 02:01:21")));
+        assertThat("firstReviewRequest.branch", firstRequest.getBranch(), is("trunk"));
+        assertThat("firstReviewRequest.bugsClosed", firstRequest.getBugsClosed().size(), is(0));
+        assertThat("firstReviewRequest.testingDone", firstRequest.getTestingDone(), is(""));
+        
+        List<String> targetPeople = firstRequest.getTargetPeople();
+        assertThat("firstReviewRequest.targetPeople.size", targetPeople.size(), is(1));
+        assertThat("firstReviewRequest.targetPeople[0]", targetPeople.get(0), is("grumpy"));
+        
+        assertThat("firstReviewRequest.targetGroups", firstRequest.getTargetGroups().size(), is(0));
+        assertThat("firstReviewRequest.repository", firstRequest.getRepository(), is("Review Board SVN"));
+        
+        // second review request, just test the fields which are not set in the first one
+        ReviewRequest secondRequest = reviewRequests.get(1);
+        
+        assertThat("reviewRequests[1].bugsClosed", secondRequest.getBugsClosed(), is(Collections.singletonList("12345")));
+        assertThat("reviewRequests[1].changeNumber", secondRequest.getChangeNumber(), is(1234));
+        
+        // third review request, just test the fields which are not set in the first one
+        ReviewRequest thirdRequest = reviewRequests.get(2);
+        
+        assertThat("reviewRequests[2].targetGroups", thirdRequest.getTargetGroups(), is(Collections.singletonList("emptygroup")));
+        assertThat("reviewRequests[2].testingDone", thirdRequest.getTestingDone(), is("Bar"));
+        
     }
 
-    public void testReadReviewRequests() throws Exception {
-        InputStream in = getClass().getResourceAsStream("/jsondata/review_requests.json");
+    @Test
+    public void readReviewRequest() throws Exception {
 
-        List<ReviewRequest> reviewRequests = testReader.readReviewRequests(inputStreamToString(in));
-
-        assertEquals(1, reviewRequests.size());
-    }
-
-    public void testReadReviewRequest() throws Exception {
-        InputStream in = getClass().getResourceAsStream("/jsondata/review_request.json");
-
-        ReviewRequest reviewRequest = testReader.readReviewRequest(inputStreamToString(in));
+        // http://www.reviewboard.org/docs/manual/1.5/webapi/2.0/resources/review-request/
+        ReviewRequest reviewRequest = reader.readReviewRequest(readJsonTestResource("review_request.json"));
 
         assertNotNull(reviewRequest);
-        assertEquals(2, reviewRequest.getTargetPeople().size());
+        assertEquals(1, reviewRequest.getTargetPeople().size());
     }
 
-    public void testReadReviews() throws Exception {
-        InputStream in = getClass().getResourceAsStream("/jsondata/reviews.json");
+    @Test
+    public void readReviews() throws Exception {
 
-        List<Review> reviews = testReader.readReviews(inputStreamToString(in));
-
-        assertNotNull(reviews);
-        assertEquals(1, reviews.get(0).getId());
+        // http://www.reviewboard.org/docs/manual/dev/webapi/2.0/resources/review-list/
+        List<Review> reviews = reader.readReviews(readJsonTestResource("reviews.json"));
+        assertThat("reviews.size", reviews.size(), is(1));
+        
+        Review firstReview = reviews.get(0);
+        assertThat("reviews[0].id", firstReview.getId(), is(8));
+        assertThat("reviews[0].bodyBottom", firstReview.getBodyBottom(), is(""));
+        assertThat("reviews[0].bodyTop", firstReview.getBodyTop(), is(""));
+        assertThat("reviews[0].user", firstReview.getUser(), is("admin"));
+        assertThat("reviews[0].public", firstReview.isPublicReview(), is(true));
+        assertThat("reviews[0].shipIt", firstReview.getShipIt(), is(false));
+        assertThat("reviews[0].timestamp", firstReview.getTimestamp(), is(ReviewboardAttributeMapper.parseDateValue("2010-08-28 02:25:31")));
     }
 
-    public void testReadReviewComments() throws Exception {
-        InputStream in = getClass().getResourceAsStream("/jsondata/review_comments.json");
+    @Test
+    public void readDiffComments() throws ReviewboardException, IOException {
+        
+        List<DiffComment> diffs = reader.readDiffComments(readJsonTestResource("diff_comments.json"));
 
-        List<Comment> comments = testReader.readComments(inputStreamToString(in));
-
-        assertNotNull(comments);
-        assertEquals(1, comments.get(0).getId());
+        assertThat("diffComments.size", diffs.size(), is(2));
+        
+        DiffComment firstComment = diffs.get(0);
+        
+        assertThat("diffComments[0].id", firstComment.getId(), is(5));
+        assertThat("diffComments[0].username", firstComment.getUsername(), is("admin"));
+        assertThat("diffComments[0].text", firstComment.getText(), is("This is just a sample comment."));
+        assertThat("diffComments[0].timestamp", firstComment.getTimestamp(), is(ReviewboardAttributeMapper.parseDateValue("2010-08-22 17:25:41")));
     }
-
-    public void testReadReviewReplies() throws Exception {
-        InputStream in = getClass().getResourceAsStream("/jsondata/review_replies.json");
-
-        List<Review> comments = testReader.readReplies(inputStreamToString(in));
-
-        assertNotNull(comments);
-        assertEquals(2, comments.get(0).getId());
+    
+    @Test
+    public void readDiffs() throws ReviewboardException, IOException {
+        
+        // http://www.reviewboard.org/docs/manual/1.5/webapi/2.0/resources/diff-list/
+        List<Diff> diffs = reader.readDiffs(readJsonTestResource("diffs.json"));
+        
+        assertThat("diffs.size", diffs.size(), is(3));
+        
+        Diff firstDiff = diffs.get(0);
+        
+        assertThat("diffs[0].id", firstDiff.getId(), is(8));
+        assertThat("diffs[0].revision", firstDiff.getRevision(), is(1));
+        assertThat("diffs[0].timestamp", firstDiff.getTimestamp(), is (ReviewboardAttributeMapper.parseDateValue("2009-02-25 02:01:21")));
     }
 
 }

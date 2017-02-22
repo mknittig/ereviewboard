@@ -37,13 +37,42 @@
  *******************************************************************************/
 package org.review_board.ereviewboard.core.model;
 
+import java.util.EnumMap;
+import java.util.Map;
+
 /**
  * Abstract class for queries getting review requests by status.
  *
  * @author Markus Knittig
  */
 public abstract class StatusReviewRequestQuery implements ReviewRequestQuery {
+    
+    enum Parameter {
+        Status("status"), ToUsers("to-users"),FromUser("from-user"),ToGroups("to-groups"),Repository("repository"),ChangeNum("changenum");
+        
+        public static Parameter fromString(String value) {
+            
+            for ( Parameter parameter : Parameter.values() )
+                if ( parameter.getParameterName().equals(value))
+                    return parameter;
+            
+            throw new IllegalArgumentException("Unknown query parameter " + value);
+        }
+        
+        private final String parameterName;
 
+        private Parameter(String parameterName) {
+            
+            this.parameterName = parameterName;
+        }
+        
+        String getParameterName() {
+        
+            return parameterName;
+        }
+        
+    }
+    
     private ReviewRequestStatus status;
 
     public StatusReviewRequestQuery(ReviewRequestStatus status) {
@@ -52,44 +81,72 @@ public abstract class StatusReviewRequestQuery implements ReviewRequestQuery {
     }
 
     public String getQuery() {
-        if (status == null) {
+
+        if (status == null)
             return "";
-        } else {
-            return String.format("/?status=%s", status.getDisplayname().toLowerCase());
-        }
+
+        return "?" + Parameter.Status.getParameterName() + "=" + status.getDisplayname().toLowerCase();
     }
 
     public void setStatus(ReviewRequestStatus status) {
         this.status = status;
     }
+    
+    public ReviewRequestStatus getStatus() {
+        return status;
+    }
 
     public static ReviewRequestQuery fromQueryString(String queryString) {
-        ReviewRequestQuery result = null;
-        ReviewRequestStatus status = ReviewRequestStatus.PENDING;
 
-        int statusIndex = queryString.indexOf("?");
-        if (statusIndex > 0) {
-            status = ReviewRequestStatus.parseStatus(queryString.substring(statusIndex + 8));
-        } else {
-            statusIndex = queryString.length();
+        Map<Parameter, String> parameters = parseQueryString(queryString);
+        ReviewRequestStatus status = ReviewRequestStatus.parseStatus(parameters.get(Parameter.Status));
+        
+        if ( parameters.containsKey(Parameter.ToUsers )) {
+
+            String usersString = parameters.get(Parameter.ToUsers);
+            
+            return new ToUserReviewRequestQuery(status, usersString);
+        } else if ( parameters.containsKey(Parameter.FromUser) ) {
+            
+            String usersString = parameters.get(Parameter.FromUser);
+            
+            return new FromUserReviewRequestQuery(status, usersString);
+        } else if ( parameters.containsKey(Parameter.ToGroups) ) {
+            
+            String groupsName = parameters.get(Parameter.ToGroups);
+            
+            return new GroupReviewRequestQuery(status, groupsName);
+        } else if ( parameters.containsKey(Parameter.Repository) ) {
+            
+            int repositoryId = Integer.parseInt(parameters.get(Parameter.Repository));
+            int changeNum = Integer.parseInt(parameters.get(Parameter.ChangeNum));
+            
+            return new RepositoryReviewRequestQuery(status, repositoryId, changeNum);
         }
-
-        if (queryString.startsWith("/to/group/")) {
-            result = new GroupReviewRequestQuery(status, queryString.substring(11, statusIndex));
-        } else if (queryString.startsWith("/to/user/")) {
-            result = new ToUserReviewRequestQuery(status, queryString.substring(9, statusIndex));
-        } else if (queryString.startsWith("/from/user/")) {
-            result = new FromUserReviewRequestQuery(status, queryString.substring(11, statusIndex));
-        } else if (queryString.startsWith("/repository/")) {
-            int changeNumIndex = queryString.indexOf("/changenum/");
-            result = new RepositoryReviewRequestQuery(status, Integer.parseInt(queryString
-                    .substring(12, changeNumIndex)), Integer.parseInt(queryString.substring(
-                    changeNumIndex + 11, statusIndex)));
-        } else {
-            result = new AllReviewRequestQuery(status);
+        
+        return new AllReviewRequestQuery(status);
+    }
+    
+    private static Map<Parameter, String> parseQueryString(String queryString) {
+        
+        Map<Parameter, String> parsedParameters = new EnumMap<StatusReviewRequestQuery.Parameter, String>(Parameter.class);
+        
+        String[] keyValuePairs = queryString.split("\\&");
+        
+        for ( String keyValuePair : keyValuePairs ) {
+            
+            String[] keyValue = keyValuePair.split("=");
+            String keyString = keyValue[0];
+            if ( keyString.charAt(0) == '?' )
+                keyString = keyString.substring(1);
+            
+            Parameter key = Parameter.fromString(keyString);
+            String value = keyValue[1];
+            
+            parsedParameters.put(key, value);
         }
-
-        return result;
+        
+        return parsedParameters;
     }
 
 }

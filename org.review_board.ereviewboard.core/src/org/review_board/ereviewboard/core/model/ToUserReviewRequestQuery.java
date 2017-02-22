@@ -38,9 +38,9 @@
 package org.review_board.ereviewboard.core.model;
 
 /**
- * Represents a query which gets review requests with a specific user as reviewer
- * by there status.
- *
+ * Represents a query which gets review requests with a specific user as
+ * reviewer by there status.
+ * 
  * @author Markus Knittig
  */
 public class ToUserReviewRequestQuery extends StatusReviewRequestQuery {
@@ -52,9 +52,14 @@ public class ToUserReviewRequestQuery extends StatusReviewRequestQuery {
         this.username = username;
     }
 
+    public String getUsername() {
+        return username;
+    }
+
     @Override
     public String getQuery() {
-        return String.format("to/user/%s%s", username, super.getQuery());
+
+        return super.getQuery() + "&" + Parameter.ToUsers.getParameterName() + "=" + username;
     }
 
 }

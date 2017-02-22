@@ -37,42 +37,37 @@
  *******************************************************************************/
 package org.review_board.ereviewboard.core.client;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.io.UnsupportedEncodingException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URLEncoder;
+import java.text.NumberFormat;
+import java.util.*;
 
-import org.eclipse.core.runtime.CoreException;
-import org.eclipse.core.runtime.IProgressMonitor;
-import org.eclipse.core.runtime.OperationCanceledException;
-import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.*;
 import org.eclipse.mylyn.commons.net.AbstractWebLocation;
+import org.eclipse.mylyn.commons.net.Policy;
+import org.eclipse.mylyn.tasks.core.IRepositoryPerson;
 import org.eclipse.mylyn.tasks.core.IRepositoryQuery;
 import org.eclipse.mylyn.tasks.core.TaskRepository;
-import org.eclipse.mylyn.tasks.core.data.TaskAttributeMapper;
-import org.eclipse.mylyn.tasks.core.data.TaskData;
-import org.eclipse.mylyn.tasks.core.data.TaskDataCollector;
+import org.eclipse.mylyn.tasks.core.data.*;
+import org.review_board.ereviewboard.core.ReviewboardAttributeMapper;
+import org.review_board.ereviewboard.core.ReviewboardAttributeMapper.Attribute;
 import org.review_board.ereviewboard.core.ReviewboardCorePlugin;
 import org.review_board.ereviewboard.core.ReviewboardTaskMapper;
 import org.review_board.ereviewboard.core.exception.ReviewboardException;
-import org.review_board.ereviewboard.core.model.Comment;
-import org.review_board.ereviewboard.core.model.Repository;
-import org.review_board.ereviewboard.core.model.Review;
-import org.review_board.ereviewboard.core.model.ReviewGroup;
-import org.review_board.ereviewboard.core.model.ReviewRequest;
-import org.review_board.ereviewboard.core.model.User;
+import org.review_board.ereviewboard.core.model.*;
 import org.review_board.ereviewboard.core.util.ReviewboardUtil;
 
 /**
  * RESTful implementation of {@link ReviewboardClient}.
- *
+ * 
  * @author Markus Knittig
  */
 public class RestfulReviewboardClient implements ReviewboardClient {
-
+    
+    private static final int REVIEW_DIFF_TICKS = 6;
+    
     private final AbstractWebLocation location;
 
     private final RestfulReviewboardReader reviewboardReader;
@@ -98,202 +93,401 @@ public class RestfulReviewboardClient implements ReviewboardClient {
         return clientData;
     }
 
-
     public void refreshRepositorySettings(TaskRepository repository) {
         // Nothing to do yet
     }
 
     public TaskData getTaskData(TaskRepository taskRepository, final String taskId,
-            IProgressMonitor monitor) {
-        // TODO Get review request
+            IProgressMonitor monitor) throws ReviewboardException {
 
-        TaskData taskData = new TaskData(new TaskAttributeMapper(taskRepository),
-                ReviewboardCorePlugin.REPOSITORY_KIND, location.getUrl(), taskId);
+        long start = System.currentTimeMillis();
+        
+        monitor.beginTask("", 4 + REVIEW_DIFF_TICKS); // 4 known + 6 chunks for loading diff comment count
 
-        return taskData;
+        try {
+            
+            ReviewRequest reviewRequest = reviewboardReader.readReviewRequest(httpClient.executeGet(
+                    "/api/review-requests/" + Integer.parseInt(taskId) + "/", monitor));
+            
+            Policy.advance(monitor, 1);
+            
+            TaskData taskData = getTaskDataForReviewRequest(taskRepository, reviewRequest, false);
+            
+            List<Diff> diffs = loadDiffs(Integer.parseInt(taskData.getTaskId()), monitor);
+            
+            Policy.advance(monitor, 1);
+            
+            loadReviewsAndDiffsAsComment(taskData, diffs, monitor);
+            
+            loadDiffsAndScreenshotsAsAttachments(taskData, taskRepository, diffs, monitor);
+
+            return taskData;
+        } finally {
+            
+            double elapsed = ( System.currentTimeMillis() - start) / 1000.0;
+            
+            System.out.println("Review request with id  " + taskId + " synchronized in " + NumberFormat.getNumberInstance().format(elapsed) + " seconds.");
+            
+            monitor.done();
+        }
+    }
+
+    /**
+     * Advances monitor by one + {@value #REVIEW_DIFF_TICKS}
+     * 
+     */
+    private void loadReviewsAndDiffsAsComment(TaskData taskData, List<Diff> diffs, IProgressMonitor monitor)
+            throws  ReviewboardException {
+
+        SortedMap<Date, Comment2> sortedComments = new TreeMap<Date, Comment2>();
+
+        for (Diff diff : diffs ) {
+
+            Comment2 comment = new Comment2();
+            comment.setAuthor(taskData.getAttributeMapper().getTaskRepository().createPerson(
+                    taskData.getRoot().getAttribute(Attribute.SUBMITTER.toString()).getValue()));
+            comment.setText(Diff.DIFF_REVISION_PREFIX + diff.getRevision());
+
+            sortedComments.put(diff.getTimestamp(), comment);
+        }
+        
+        List<Review> reviews = reviewboardReader.readReviews(httpClient.executeGet("/api/review-requests/" + taskData.getTaskId() + "/reviews", monitor));
+
+        Policy.advance(monitor, 1);
+
+        int shipItCount = 0;
+        
+        IProgressMonitor reviewDiffMonitor = Policy.subMonitorFor(monitor, REVIEW_DIFF_TICKS);
+        reviewDiffMonitor.beginTask("", reviews.size());
+        
+        try {
+            for (Review review : reviews) {
+
+                int reviewId = review.getId();
+                int totalResults = readDiffComments(Integer.parseInt(taskData.getTaskId()),
+                        reviewId, monitor).size();
+
+                Policy.advance(reviewDiffMonitor, 1);
+
+                StringBuilder text = new StringBuilder();
+                boolean shipit = review.getShipIt();
+                boolean appendWhiteSpace = false;
+                if (shipit) {
+                    text.append("Ship it!");
+                    shipItCount++;
+                    appendWhiteSpace = true;
+                }
+                if (review.getBodyTop().length() != 0) {
+                    if (appendWhiteSpace)
+                        text.append("\n\n");
+
+                    text.append(review.getBodyTop());
+                    appendWhiteSpace = true;
+                }
+                if (totalResults != 0) {
+                    if (appendWhiteSpace)
+                        text.append("\n\n");
+
+                    text.append(totalResults).append(" inline comments.");
+
+                    appendWhiteSpace = true;
+                }
+                if (review.getBodyBottom().length() != 0) {
+                    if (appendWhiteSpace)
+                        text.append("\n\n");
+
+                    text.append(review.getBodyBottom());
+                }
+
+                Comment2 comment = new Comment2();
+                comment.setAuthor(taskData.getAttributeMapper().getTaskRepository().createPerson(
+                        review.getUser()));
+                comment.setText(text.toString());
+
+                sortedComments.put(review.getTimestamp(), comment);
+
+            }
+        } finally {
+            reviewDiffMonitor.done();
+        }
+        
+        TaskAttribute shipItAttribute = taskData.getRoot().createAttribute(Attribute.SHIP_IT.toString());
+        shipItAttribute.setValue(String.valueOf(shipItCount));
+        shipItAttribute.getMetaData().setLabel(Attribute.SHIP_IT.getDisplayName()).setType(Attribute.SHIP_IT.getAttributeType());
+        shipItAttribute.getMetaData().setReadOnly(true).setKind(Attribute.SHIP_IT.getAttributeKind());
+
+        int commentIndex = 1;
+        
+        for ( Map.Entry<Date, Comment2>  entry : sortedComments.entrySet() )
+            entry.getValue().applyTo(taskData, commentIndex++, entry.getKey());
+    }
+
+    private List<DiffComment> readDiffComments(int reviewRequestId, int reviewId, IProgressMonitor monitor) throws ReviewboardException {
+        
+        return reviewboardReader.readDiffComments(httpClient.executeGet("/api/review-requests/" + reviewRequestId+"/reviews/" + reviewId +"/diff-comments", monitor));
+    }
+    
+    /**
+     * Advances monitor by one
+     */
+    private void loadDiffsAndScreenshotsAsAttachments(TaskData taskData, TaskRepository taskRepository, List<Diff> diffs, IProgressMonitor monitor) throws ReviewboardException {
+        
+        List<Screenshot> screenshots = loadScreenshots(Integer.parseInt(taskData.getTaskId()), monitor);
+        
+        Policy.advance(monitor, 1);
+        
+        if ( diffs.isEmpty() && screenshots.isEmpty() )
+            return;
+        
+        int mostRecentRevision = diffs.size();
+
+        for (Diff diff : diffs) {
+            TaskAttribute attribute = taskData.getRoot().createAttribute(TaskAttribute.PREFIX_ATTACHMENT + diff.getRevision());
+            TaskAttachmentMapper mapper = TaskAttachmentMapper.createFrom(attribute);
+            mapper.setFileName(diff.getName());
+            mapper.setDescription(diff.getName());
+            mapper.setAuthor(taskRepository.createPerson(taskData.getRoot().getAttribute(ReviewboardAttributeMapper.Attribute.SUBMITTER.toString()).getValue()));
+            mapper.setCreationDate(diff.getTimestamp());
+            mapper.setAttachmentId(Integer.toString(diff.getId()));
+            mapper.setPatch(Boolean.TRUE);
+            mapper.setDeprecated(diff.getRevision() != mostRecentRevision);
+            mapper.setLength(ReviewboardAttachmentHandler.ATTACHMENT_SIZE_UNKNOWN);
+            mapper.applyTo(attribute);
+            
+            attribute.createAttribute(ReviewboardAttachmentHandler.ATTACHMENT_ATTRIBUTE_REVISION).setValue(String.valueOf(diff.getRevision()));
+        }
+        
+        int attachmentIndex = mostRecentRevision;
+        
+        for ( Screenshot screenshot : screenshots ) {
+  
+            TaskAttribute attribute = taskData.getRoot().createAttribute(TaskAttribute.PREFIX_ATTACHMENT + ++ attachmentIndex);
+            TaskAttachmentMapper mapper = TaskAttachmentMapper.createFrom(attribute);
+            mapper.setFileName(screenshot.getFileName());
+            mapper.setDescription(screenshot.getCaption());
+            mapper.setAttachmentId(Integer.toString(screenshot.getId()));
+            mapper.setLength(ReviewboardAttachmentHandler.ATTACHMENT_SIZE_UNKNOWN);
+            mapper.setContentType(screenshot.getContentType());
+            mapper.setUrl(stripPathFromLocation() + screenshot.getUrl());
+            mapper.applyTo(attribute);
+        }
+        
+    }
+
+    private String stripPathFromLocation() throws ReviewboardException {
+        
+        try {
+            URI uri = new URI(location.getUrl());
+            uri.getPath();
+            return location.getUrl().substring(0, location.getUrl().length() - uri.getPath().length());
+        } catch (URISyntaxException e) {
+            throw new ReviewboardException("Unable to retrive host from the location", e);
+        }
     }
 
     public List<Repository> getRepositories(IProgressMonitor monitor) throws ReviewboardException {
-        return reviewboardReader.readRepositories(httpClient.executeGet("/api/json/repositories/", monitor));
+        return reviewboardReader.readRepositories(httpClient.executeGet("/api/repositories/", monitor));
     }
 
     public List<User> getUsers(IProgressMonitor monitor) throws ReviewboardException {
-        return reviewboardReader.readUsers(httpClient.executeGet("/api/json/users/", monitor));
+        return reviewboardReader.readUsers(httpClient.executeGet("/api/users/", monitor));
     }
 
     public List<ReviewGroup> getReviewGroups(IProgressMonitor monitor) throws ReviewboardException {
-        return reviewboardReader.readGroups(httpClient.executeGet("/api/json/groups/", monitor));
+        return reviewboardReader.readGroups(httpClient.executeGet("/api/groups/", monitor));
     }
 
-    public List<ReviewRequest> getReviewRequests(String query, IProgressMonitor monitor) throws ReviewboardException {
-        return reviewboardReader.readReviewRequests(
-                httpClient.executeGet("/api/json/reviewrequests/" + query, monitor));
+    public List<ReviewRequest> getReviewRequests(String query, IProgressMonitor monitor)
+            throws ReviewboardException {
+        
+        return reviewboardReader.readReviewRequests( httpClient.executeGet("/api/review-requests/" + query, monitor));
+    }
+    
+    private List<Diff> loadDiffs(int reviewRequestId, IProgressMonitor monitor) throws ReviewboardException {
+        
+        return reviewboardReader.readDiffs(httpClient.executeGet("/api/review-requests/" + reviewRequestId+"/diffs", monitor));
     }
 
-    public ReviewRequest newReviewRequest(ReviewRequest reviewRequest, IProgressMonitor monitor) throws ReviewboardException {
-        Map<String, String> parameters = new HashMap<String, String>();
-        parameters.put("repository_id", String.valueOf(reviewRequest.getRepository().getId()));
-        if (reviewRequest.getChangeNumber() != null) {
-            parameters.put("changenum", String.valueOf(reviewRequest.getChangeNumber()));
-        }
-
-        ReviewRequest newReviewRequest = reviewboardReader.readReviewRequest(httpClient.executePost(
-                "/api/json/reviewrequests/new/", parameters, monitor));
-        reviewRequest.setId(newReviewRequest.getId());
-        reviewRequest.setTimeAdded(newReviewRequest.getTimeAdded());
-        reviewRequest.setLastUpdated(newReviewRequest.getLastUpdated());
-        reviewRequest.setSubmitter(newReviewRequest.getSubmitter());
-
-        // TODO
-        // reviewRequest.getTargetPeople().add(newReviewRequest.getSubmitter());
-        // reviewRequest.setSummary("Test");
-        // reviewRequest.setDescription("Test");
-        // updateReviewRequest(reviewRequest);
-
-        return reviewRequest;
+    private List<Screenshot> loadScreenshots(int reviewRequestId, IProgressMonitor monitor) throws ReviewboardException {
+        
+        return reviewboardReader.readScreenshots(httpClient.executeGet("/api/review-requests/" + reviewRequestId+"/screenshots", monitor));
     }
-
-    public ReviewRequest getReviewRequest(int reviewRequestId, IProgressMonitor monitor) throws ReviewboardException {
-        return reviewboardReader.readReviewRequest(httpClient.executeGet("/api/json/reviewrequests/"
-                + reviewRequestId + "/", monitor));
-    }
-
-    public List<Review> getReviews(int reviewRequestId, IProgressMonitor monitor) throws ReviewboardException {
-        List<Review> result = reviewboardReader.readReviews(
-                httpClient.executeGet("/api/json/reviewrequests/" + reviewRequestId + "/reviews/", monitor));
-
-        for (Review review : result) {
-            sortCommentsByLine(review);
-        }
-
-        return result;
-    }
-
-    private void sortCommentsByLine(Review review) {
-        Collections.sort(review.getComments(), new Comparator<Comment>() {
-            public int compare(Comment comment1, Comment comment2) {
-                return ((Integer) comment1.getFirstLine()).compareTo(comment2.getFirstLine());
-            }
-        });
-    }
-
-    public void updateReviewRequest(ReviewRequest reviewRequest, IProgressMonitor monitor) throws ReviewboardException {
-        Map<String, String> parameters = new HashMap<String, String>();
-
-        parameters.put("status", reviewRequest.getStatus().toString());
-        // parameters.put("public", reviewRequest.getPublicReviewRequest());
-        parameters.put("summary", reviewRequest.getSummary());
-        parameters.put("description", reviewRequest.getDescription());
-        parameters.put("testing_done", reviewRequest.getTestingDone());
-        parameters.put("branch", reviewRequest.getBranch());
-        parameters.put("bugs_closed", ReviewboardUtil.joinList(reviewRequest.getBugsClosed()));
-        parameters.put("target_groups", ReviewboardUtil.joinList(reviewRequest.getTargetGroups()));
-        parameters.put("target_people", ReviewboardUtil.joinList(reviewRequest.getTargetPeople()));
-
-        httpClient.executePost("/api/json/reviewrequests/" + reviewRequest.getId() + "/draft/set/",
-                parameters, monitor);
-        httpClient.executePost("/api/json/reviewrequests/" + reviewRequest.getId() + "/draft/save/", monitor);
-        httpClient.executePost("/api/json/reviewrequests/" + reviewRequest.getId() + "/publish/", monitor);
+    
+    private List<Integer> getReviewRequestIds(String query, IProgressMonitor monitor)
+            throws ReviewboardException {
+        return reviewboardReader.readReviewRequestIds(
+                httpClient.executeGet("/api/review-requests/" + query, monitor));
     }
 
     public boolean hasRepositoryData() {
         return (clientData.lastupdate != 0);
     }
 
-    public void updateRepositoryData(boolean force, IProgressMonitor monitor) {
+    public void updateRepositoryData(boolean force, IProgressMonitor monitor) throws ReviewboardException {
         if (hasRepositoryData() && !force) {
             return;
         }
+        
+        monitor.beginTask("Refreshing repository data", 3);
 
         try {
-            monitor.subTask("Retrieving Reviewboard groups");
             clientData.setGroups(getReviewGroups(monitor));
-            monitorWorked(monitor);
+            Policy.advance(monitor, 1);
 
-            monitor.subTask("Retrieving Reviewboard users");
             clientData.setUsers(getUsers(monitor));
-            monitorWorked(monitor);
+            Policy.advance(monitor, 1);
 
-            monitor.subTask("Retrieving Reviewboard repositories");
             clientData.setRepositories(getRepositories(monitor));
-            monitorWorked(monitor);
-
+            Policy.advance(monitor, 1);
+            
             clientData.lastupdate = new Date().getTime();
-        } catch (Exception e) {
-            // TODO: handle exception
-            throw new RuntimeException(e);
-        }
-    }
-
-    private void monitorWorked(IProgressMonitor monitor) {
-        monitor.worked(1);
-        if (monitor.isCanceled()) {
-            throw new OperationCanceledException();
+        } finally  {
+            monitor.done();
         }
     }
 
     public void performQuery(TaskRepository repository, IRepositoryQuery query,
             TaskDataCollector collector, IProgressMonitor monitor) throws CoreException {
         try {
+            
             List<ReviewRequest> reviewRequests = getReviewRequests(query.getUrl(), monitor);
+            
             for (ReviewRequest reviewRequest : reviewRequests) {
-                TaskData taskData = getTaskDataForReviewRequest(repository, reviewRequest);
+                TaskData taskData = getTaskDataForReviewRequest(repository, reviewRequest, true);
                 collector.accept(taskData);
             }
         } catch (ReviewboardException e) {
-            throw new CoreException(Status.CANCEL_STATUS);
+            
+            // Mylyn does not log the error cause, just decorates the query in the task list
+            Status status = new Status(IStatus.ERROR, ReviewboardCorePlugin.PLUGIN_ID, "Failed performing query : " + e.getMessage(), e);
+            ReviewboardCorePlugin.getDefault().getLog().log(status);
+            throw new CoreException(status);
         }
     }
 
     private TaskData getTaskDataForReviewRequest(TaskRepository taskRepository,
-            ReviewRequest reviewRequest) {
-        String summary = reviewRequest.getSummary();
-        String id = String.valueOf(reviewRequest.getId());
-        String owner = reviewRequest.getSubmitter().getUsername();
-        Date creationDate = reviewRequest.getTimeAdded();
-        Date dateModified = reviewRequest.getLastUpdated();
-        String description = reviewRequest.getDescription();
+            ReviewRequest reviewRequest, boolean partial) {
 
-        TaskData taskData = new TaskData(new TaskAttributeMapper(taskRepository),
+        String id = String.valueOf(reviewRequest.getId());
+        Date dateModified = reviewRequest.getLastUpdated();
+        ReviewRequestStatus status = reviewRequest.getStatus();
+
+        TaskData taskData = new TaskData(new ReviewboardAttributeMapper(taskRepository),
                 ReviewboardCorePlugin.REPOSITORY_KIND, location.getUrl(), id);
-        taskData.setPartial(true);
+        taskData.setPartial(partial);
 
         ReviewboardTaskMapper mapper = new ReviewboardTaskMapper(taskData, true);
+        // mapped fields
         mapper.setTaskKey(id);
-        mapper.setCreationDate(creationDate);
-        mapper.setModificationDate(dateModified);
-        mapper.setSummary(summary);
-        mapper.setOwner(owner);
-        mapper.setDescription(description);
+        mapper.setReporter(reviewRequest.getSubmitter());
+        mapper.setCreationDate(reviewRequest.getTimeAdded());
+        mapper.setSummary(reviewRequest.getSummary());
+        mapper.setDescription(reviewRequest.getDescription());
         mapper.setTaskUrl(ReviewboardUtil.getReviewRequestUrl(taskRepository.getUrl(), id));
+        mapper.setStatus(status.name().toLowerCase());
+        if ( status != ReviewRequestStatus.PENDING )
+            mapper.setCompletionDate(dateModified);
 
+        
+        if ( reviewRequest.getRepository() != null )
+            mapper.setRepository(reviewRequest.getRepository());
+        mapper.setBranch(reviewRequest.getBranch());
+        mapper.setChangeNum(reviewRequest.getChangeNumber());
+        mapper.setPublic(reviewRequest.isPublic());
+        mapper.setBugsClosed(reviewRequest.getBugsClosed());
+        mapper.setTestingDone(reviewRequest.getTestingDone());
+        mapper.setTargetPeople(reviewRequest.getTargetPeople());
+        mapper.setTargetGroups(reviewRequest.getTargetGroups());
+        
+        if ( !partial) {
+            // on purpose not set for partial tasks
+            mapper.setModificationDate(dateModified);
+        }
+        
+        mapper.complete();
+        
         return taskData;
     }
 
-    public List<String> getRawDiffs(int reviewRequestId, IProgressMonitor monitor) throws ReviewboardException {
-        List<String> diffs = new ArrayList<String>();
-        int iter = 1;
-
-        // XXX Ugly hack, there should be an API call for this function
-        while (true) {
-            try {
-                diffs.add(httpClient.executeGet(String.format("/r/%d/diff/%d/raw/", reviewRequestId, iter), monitor));
-                iter++;
-            } catch (Exception e) {
-                break;
-            }
-        }
-
-        return diffs;
+    public byte[] getRawDiff(int reviewRequestId, int diffRevision, IProgressMonitor monitor) throws ReviewboardException {
+        
+        return httpClient.executeGetForBytes("/api/review-requests/" + reviewRequestId + "/diffs/" + diffRevision +"/","text/x-patch", monitor);
+    }
+    
+    public byte[] getScreenshot(String url, IProgressMonitor monitor) throws ReviewboardException {
+        return httpClient.executeGetForBytes("/" + url, "image/*", monitor);
     }
 
-    public boolean validCredentials(String username, String password, IProgressMonitor monitor) {
+    public IStatus validate(String username, String password, IProgressMonitor monitor) {
+
         try {
+            
+            if ( !httpClient.apiEntryPointExist(monitor) )
+                return new Status(IStatus.ERROR, ReviewboardCorePlugin.PLUGIN_ID, "Repository not found. Please make sure that the path to the repository correct and the  server version is at least 1.5");
+            
+            Policy.advance(monitor, 1);
+            
             httpClient.login(username, password, monitor);
-            return true;
+            
+            Policy.advance(monitor, 1);
+            
+            ServerInfo serverInfo = reviewboardReader.readServerInfo(httpClient.executeGet("/api/info", monitor));
+            
+            Policy.advance(monitor, 1);
+            
+            if ( !serverInfo.isAtLeast(1, 5) )
+                return new Status(IStatus.ERROR, ReviewboardCorePlugin.PLUGIN_ID, "The version " + serverInfo.getProductVersion() + " is not supported. Please use a repository version of 1.5 or newer.");
+            
+            return Status.OK_STATUS;
+        } catch ( ReviewboardException e ) {
+            return new Status(IStatus.ERROR, ReviewboardCorePlugin.PLUGIN_ID, e.getMessage(), e);
         } catch (Exception e) {
-            return false;
+            return new Status(IStatus.ERROR, ReviewboardCorePlugin.PLUGIN_ID, "Unexpected exception : " + e.getMessage(), e);
+        } finally {
+            monitor.done();
         }
     }
+    
+    public List<Integer> getReviewsIdsChangedSince(Date timestamp, IProgressMonitor monitor) throws ReviewboardException {
+        
+        try {
+            // TODO: extract into a ReviewRequestQuery
+            Assert.isNotNull(timestamp);
+            
+            String query = "?last-updated-from=" + URLEncoder.encode( ReviewboardAttributeMapper.newIso86011DateFormat().format(timestamp), "UTF-8");
+            return getReviewRequestIds( query, monitor);
+            
+        } catch (UnsupportedEncodingException e) {
+            throw new ReviewboardException("Failed encoding the query url", e);
+        }
+        
+    }
 
+    private static class Comment2 {
+
+        private IRepositoryPerson author;
+        private String text;
+
+        public void setAuthor(IRepositoryPerson author) {
+            this.author = author;
+        }
+
+        public void setText(String text) {
+            this.text = text;
+        }
+
+        public void applyTo(TaskData taskData, int index, Date creationDate) {
+
+            TaskAttribute attribute = taskData.getRoot().createAttribute(TaskAttribute.PREFIX_COMMENT + index);
+
+            TaskCommentMapper mapper = new TaskCommentMapper();
+            mapper.setCommentId(String.valueOf(index));
+            mapper.setCreationDate(creationDate);
+            mapper.setAuthor(author);
+            mapper.setText(text);
+            mapper.setNumber(index);
+
+            mapper.applyTo(attribute);
+        }
+    }
 }

@@ -38,6 +38,7 @@
 package org.review_board.ereviewboard.core;
 
 import java.util.Date;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -54,6 +55,7 @@ import org.eclipse.mylyn.tasks.core.ITaskMapping;
 import org.eclipse.mylyn.tasks.core.RepositoryResponse;
 import org.eclipse.mylyn.tasks.core.TaskRepository;
 import org.eclipse.mylyn.tasks.core.TaskRepositoryLocationFactory;
+import org.eclipse.mylyn.tasks.core.data.AbstractTaskAttachmentHandler;
 import org.eclipse.mylyn.tasks.core.data.AbstractTaskDataHandler;
 import org.eclipse.mylyn.tasks.core.data.TaskAttribute;
 import org.eclipse.mylyn.tasks.core.data.TaskAttributeMapper;
@@ -61,7 +63,9 @@ import org.eclipse.mylyn.tasks.core.data.TaskData;
 import org.eclipse.mylyn.tasks.core.data.TaskDataCollector;
 import org.eclipse.mylyn.tasks.core.data.TaskMapper;
 import org.eclipse.mylyn.tasks.core.sync.ISynchronizationSession;
+import org.review_board.ereviewboard.core.client.ReviewboardAttachmentHandler;
 import org.review_board.ereviewboard.core.client.ReviewboardClient;
+import org.review_board.ereviewboard.core.exception.ReviewboardException;
 import org.review_board.ereviewboard.core.util.ReviewboardUtil;
 
 /**
@@ -69,8 +73,8 @@ import org.review_board.ereviewboard.core.util.ReviewboardUtil;
  *
  */
 public class ReviewboardRepositoryConnector extends AbstractRepositoryConnector {
-
-    private static final String CLIENT_LABEL = "Reviewboard (supports 1.0 and later)";
+    
+    private static final String CLIENT_LABEL = "Reviewboard (supports 1.5 and later)";
 
     private final static Pattern REVIEW_REQUEST_ID_FROM_TASK_URL = Pattern
             .compile(ReviewboardConstants.REVIEW_REQUEST_URL + "(\\d+)");
@@ -119,10 +123,22 @@ public class ReviewboardRepositoryConnector extends AbstractRepositoryConnector 
     }
 
     @Override
+    public AbstractTaskAttachmentHandler getTaskAttachmentHandler() {
+     
+        return new ReviewboardAttachmentHandler(this);
+    }
+    
+    @Override
     public TaskData getTaskData(TaskRepository taskRepository, String taskId,
             IProgressMonitor monitor) throws CoreException {
-        ReviewboardClient client = getClientManager().getClient(taskRepository);
-        return client.getTaskData(taskRepository, taskId, monitor);
+        try {
+            ReviewboardClient client = getClientManager().getClient(taskRepository);
+            return client.getTaskData(taskRepository, taskId, monitor);
+        } catch (ReviewboardException e) {
+            Status status = new Status(IStatus.ERROR, ReviewboardCorePlugin.PLUGIN_ID, "Failed getting task data for task with id " + taskId , e);
+            ReviewboardCorePlugin.getDefault().getLog().log(status);
+            throw new CoreException(status);
+        }
     }
 
     @Override
@@ -143,15 +159,52 @@ public class ReviewboardRepositoryConnector extends AbstractRepositoryConnector 
 
     @Override
     public boolean hasTaskChanged(TaskRepository taskRepository, ITask task, TaskData taskData) {
-        TaskMapper scheme = new TaskMapper(taskData);
-        Date repositoryDate = scheme.getModificationDate();
-        Date localeDate = task.getModificationDate();
+        
+        Date repositoryDate = getTaskMapping(taskData).getModificationDate();
+        Date localDate = task.getModificationDate();
+        
+        if ( repositoryDate == null )
+            return false;
 
-        if (localeDate != null) {
-            return !localeDate.equals(repositoryDate);
+        return !repositoryDate.equals(localDate);
+    }
+    
+    @Override
+    public void preSynchronization(ISynchronizationSession event, IProgressMonitor monitor)
+            throws CoreException {
+        try {
+            // No Tasks, don't contact the repository
+            if (event.getTasks().isEmpty())
+                return;
+
+            TaskRepository repository = event.getTaskRepository();
+
+            // no previous sync, all are stale
+            if (repository.getSynchronizationTimeStamp() == null || repository.getSynchronizationTimeStamp().length() == 0) {
+                for (ITask task : event.getTasks())
+                    event.markStale(task);
+                return;
+            }
+            
+            Date lastSyncTimestamp = new Date(Long.parseLong(repository.getSynchronizationTimeStamp()));
+            
+            ReviewboardClient client = getClientManager().getClient(repository);
+            
+            List<Integer> changedReviewIds = client.getReviewsIdsChangedSince(lastSyncTimestamp, monitor);
+            
+            if ( changedReviewIds.isEmpty() )
+                return;
+            
+            for ( ITask task : event.getTasks() )
+                if ( changedReviewIds.contains(Integer.valueOf(task.getTaskId())) )
+                    event.markStale(task);
+            
+            
+        } catch (ReviewboardException e) {
+            Status status = new Status(IStatus.ERROR, ReviewboardCorePlugin.PLUGIN_ID, "Failed retrieving changed review ids", e);
+            ReviewboardCorePlugin.getDefault().getLog().log(status);
+            throw new CoreException(status);
         }
-
-        return true;
     }
 
     @Override
@@ -164,27 +217,62 @@ public class ReviewboardRepositoryConnector extends AbstractRepositoryConnector 
             client.performQuery(repository, query, collector, monitor);
         } catch (CoreException e) {
             return e.getStatus();
+        } catch ( ReviewboardException e) {
+            return new Status(IStatus.ERROR, ReviewboardCorePlugin.PLUGIN_ID, "Query failed : " + e.getMessage(), e);
         }
 
         return Status.OK_STATUS;
+    }
+    
+    @Override
+    public void postSynchronization(ISynchronizationSession event, IProgressMonitor monitor) throws CoreException {
+
+        try {
+            monitor.beginTask("", 1);
+            event.getTaskRepository().setSynchronizationTimeStamp(String.valueOf(getSynchronizationTimestamp(event).getTime()));
+        } finally {
+            monitor.done();
+        }
+    }
+
+    private Date getSynchronizationTimestamp(ISynchronizationSession event) {
+
+        Date mostRecent = new Date(0);
+        Date mostRecentTimeStamp = null;
+        if (event.getTaskRepository().getSynchronizationTimeStamp() == null) {
+            mostRecentTimeStamp = mostRecent;
+        } else {
+            mostRecentTimeStamp = new Date(Long.parseLong(event.getTaskRepository() .getSynchronizationTimeStamp()));
+        }
+        for (ITask task : event.getChangedTasks()) {
+            Date taskModifiedDate = task.getModificationDate();
+            if (taskModifiedDate != null && taskModifiedDate.after(mostRecent)) {
+                mostRecent = taskModifiedDate;
+                mostRecentTimeStamp = task.getModificationDate();
+            }
+        }
+        return mostRecentTimeStamp;
     }
 
     @Override
     public void updateRepositoryConfiguration(TaskRepository taskRepository,
             IProgressMonitor monitor) throws CoreException {
-        // ignore
+        
+        try {
+            clientManager.getClient(taskRepository).updateRepositoryData(true, monitor);
+        } catch (ReviewboardException e) {
+            throw new CoreException(new Status(IStatus.ERROR, ReviewboardCorePlugin.PLUGIN_ID, "Updating repository configuration failed : " + e.getMessage(), e));
+        }
     }
 
     @Override
     public void updateTaskFromTaskData(TaskRepository taskRepository, ITask task, TaskData taskData) {
-        TaskMapper scheme = new TaskMapper(taskData);
+        
+        TaskMapper scheme = new ReviewboardTaskMapper(taskData);
         scheme.applyTo(task);
+        
+        task.setUrl(getTaskUrl(taskRepository.getUrl(), task.getTaskId()));
         task.setCompletionDate(scheme.getCompletionDate());
-    }
-
-    @Override
-    public boolean canSynchronizeTask(TaskRepository taskRepository, ITask task) {
-        return false;
     }
 
     public synchronized ReviewboardClientManager getClientManager() {
@@ -215,8 +303,7 @@ public class ReviewboardRepositoryConnector extends AbstractRepositoryConnector 
         return new AbstractTaskDataHandler() {
             @Override
             public TaskAttributeMapper getAttributeMapper(TaskRepository taskRepository) {
-                return new TaskAttributeMapper(taskRepository) {
-                };
+                return new ReviewboardAttributeMapper(taskRepository);
             }
 
             @Override
@@ -235,5 +322,11 @@ public class ReviewboardRepositoryConnector extends AbstractRepositoryConnector 
             }
         };
 
+    }
+    
+    @Override
+    public ITaskMapping getTaskMapping(TaskData taskData) {
+        
+        return new ReviewboardTaskMapper(taskData);
     }
 }
